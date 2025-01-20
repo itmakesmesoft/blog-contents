@@ -45,6 +45,68 @@ const func = (args) => args + 1;
 
 ## this 바인딩
 
+일반 함수는 함수를 어디에서 선언했는지와 관계없이, 호출하는 시점에 `this`가 바인딩된다. 반면, 화살표 함수는 **어휘적 스코프(Lexical Scope)**가 적용되어, 함수를 정의하는 시점에 `this`가 바인딩된다. 이때, `this`는 항상 **상위 스코프의 `this`**를 가리킨다. 이를 Lexical this라고도 한다. 따라서 화살표 함수는 객체의 메서드나 생성자 함수로 사용할 수 없다.
+
+### 일반 함수의 this
+
+일반 함수는 호출된 방식에 따라 `this`가 결정된다.
+
+- 전역에서 호출하면 `this`는 전역 객체(window 또는 global)
+- 객체의 메서드로 호출하면 `this`는 해당 객체,
+- 중첩 함수에서 `this`를 사용하면 일반 함수로 호출된 것으로 간주되어 `this`는 전역 객체.
+- "use strict" 모드에서는 일반 함수 호출 시 `this`가 `undefined`로 바인딩됨.
+
+```js
+const cat = {
+  name: "meow",
+  foo1: function () {
+    const foo2 = function () {
+      console.log(this.name);
+    };
+    foo2();
+  },
+};
+
+cat.foo1(); // undefined
+```
+
+위 예제를 보면 `foo1()` 메서드를 실행하면 내부에서 `foo2()` 함수가 선언되고, 이후 `foo2()`가 실행된다. 이때 `foo2()`는 일반 함수이므로 `this`가 `foo2()`가 실행되는 시점에서 결정된다. `foo2()`는 어떠한 객체의 메서드로 호출된 것이 아니라 일반 함수로 호출되었기 때문에 `this`가 전역 객체(window 또는 global)를 가리킨다. 전역 객체에는 `name`이라는 속성이 없으므로 `undefined`가 출력된다.
+
+### 화살표 함수의 this
+
+화살표 함수는 자신만의 `this`를 가지지 않는다. `this`는 함수가 정의된 위치의 상위 스코프에서 결정된다.
+즉, 화살표 함수 내부에서 `this`를 사용하면 바깥 스코프의 `this`를 그대로 가져온다.
+
+```js
+const cat = {
+  name: "meow",
+  foo1: function () {
+    const foo2 = () => {
+      console.log(this.name);
+    };
+    foo2();
+  },
+};
+
+cat.foo1(); // "meow"
+```
+
+위 코드에서 `foo2()`는 화살표 함수이므로 `this`를 자신만의 `this`로 결정하지 않고, **`foo1()`이 실행될 때의 `this`(즉, cat 객체)**를 그대로 가져온다. 따라서 `console.log(this.name);`은 cat.name, 즉 "meow"를 출력한다.
+
+### this 바인딩 규칙 정리
+
+#### 일반 함수
+
+- 전역 공간에서 호출 → `this`는 전역 객체 (window 또는 global)
+- 객체의 메서드로 호출 → `this`는 해당 객체
+- 내부 함수 호출 → 기본적으로 전역 객체 (window 또는 global)
+
+#### 화살표 함수
+
+- 자신만의 `this`를 가지지 않음 → 상위 스코프의 `this`를 따름
+- 객체의 메서드 내부에서 정의된 경우 → 해당 메서드의 `this`를 따름
+- 콜백 함수로 전달된 경우 → 상위 스코프의 `this`를 따름
+
 ## 선언
 
 일반 함수는 함수 표현식 뿐만 아니라 함수 선언문으로도 선언이 가능한 반면,
@@ -82,13 +144,8 @@ const func = (args) => args + 1;
 
 #### 화살표 함수
 
-- 화살표 함수는 프로토타입 속성이 없음
+- 화살표 함수는 프로토타입 속성이 없음, new 키워드로 호출하면 TypeError 발생.
   ![arrow function](https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/arrow_function_structure.png)
-
-## 스코프
-
-일반 함수는 동적 스코프(Dynamic Scope)를 가짐
-화살표 함수는 렉시컬 스코프(Lexical Scope)를 가짐
 
 ## arguments
 
