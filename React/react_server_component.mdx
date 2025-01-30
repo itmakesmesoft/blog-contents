@@ -1,0 +1,260 @@
+---
+title: "React Server Component(RSC)"
+description: "React Server Component(RSC)에 대해 깊게 파해쳐보자."
+tags: ["react", "next", "rsc"]
+date: 2025-01-30 18:11:58
+thumbnail: "https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/reactServerComponents.webp"
+---
+
+디자인 시스템 관련 이슈를 처리하는 과정에서, SSR 환경에서 발생한 `useLayoutEffect` 관련 문제를 마주하게 되었다. 그 과정에서 선배 개발자분께서 `useIsomorphicLayoutEffect`를 사용하면 문제가 해결될 것 같다고 조언해주셨는데, 해당 훅은 서버에서는 `useEffect`로, 클라이언트에서는 `useLayoutEffect`로 치환되는 역할을 했다. 그 당시 나는 SSR에서 훅을 사용할 수 없다고 생각했기 때문에, 이 부분에 대해 혼란을 느꼈다.
+
+이러한 혼란은 SSR과 RSC를 동일시했던 잘못된 이해에서 비롯되었던 것 같다. React 19로 업데이트되고, Next.js 13의 App Router가 이를 적극적으로 차용하면서, 내부적으로 많은 변화가 있었지만, 이를 충분히 이해하지 못한 채 기존의 SSR 개념으로만 접근하고 있었던 것이다.
+
+그래서 이번 기회에 RSC에 대해 명확히 이해하고, SSR과 RSC는 어떤 차이가 있는지 깊게 파보고자 한다.
+
+## RSC의 등장 배경
+
+기존 React는 **클라이언트 사이드 렌더링(Client-Side Rendering, CSR)** 방식을 사용하며, 이에 따른 몇 가지 한계가 존재했다.
+
+1. 초기 로딩 속도 문제
+
+- 클라이언트가 렌더링을 수행하기 위해 모든 JavaScript 파일을 다운로드하고 실행해야 하므로, 초기 로딩이 느림.
+
+2. 데이터 패칭 구조의 비효율성
+
+- 컴포넌트 단위로 데이터를 요청하면 서버 요청이 많아지고, 부모 컴포넌트가 데이터를 받아오기 전까지 자식 컴포넌트의 렌더링이 지연됨.
+- 이로 인해 waterfall 요청(연속된 client-server API 요청과 중첩된 요청 지연)이 발생하여 사용자 경험이 저하됨.
+
+이러한 문제를 해결하기 위해 등장한 서버 사이드 렌더링(Server-Side Rendering, SSR) 은 서버에서 미리 HTML을 생성해 클라이언트로 전송하는 방식이다. 이를 통해 빈 화면 문제를 해결하고 SEO를 개선할 수 있었지만, SSR에도 한계가 존재했다.
+
+1. 서버 부하 증가
+
+- 페이지 요청마다 서버에서 HTML을 생성해야 해서 리소스 소비가 큼.
+
+2. Hydration 비용 증가
+
+- 서버에서 생성된 HTML을 클라이언트에서 다시 React 컴포넌트로 변환하는 과정이 필요함.
+
+3. 블로킹 문제
+
+- 데이터 패칭이 오래 걸릴 경우 전체 페이지 렌더링이 지연되고, 사용자 상호작용까지 딜레이됨.
+
+이러한 한계를 극복하기 위해 **HTML Streaming** 개념이 도입되었으며, 이를 가능하게 하는 기술이 바로 React Server Components(RSC) 이다.
+
+---
+
+## **React Server Component(RSC)**
+
+React Server Components(RSC)는 서버에서 페이지의 정적인 부분을 렌더링(Render Tree HTML)한 후 클라이언트로 전달하는 방식을 사용한다. 이와 동시에 나머지 동적인 데이터는 서버에서 호출된 응답 순서대로 직렬화된 binary 데이터 형태(RSC payload)로 클라이언트에 **스트리밍(Streaming HTML)**되며, 클라이언트 단에서 이를 이용해 빠르게 컴포넌트를 렌더링한다.
+
+<CustomImage
+  src="https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/rsc_1.png"
+  alt="image"
+/>
+
+사용법은 단순하다. 리액트 19 버전에서 컴포넌트는 기본적으로 서버 컴포넌트 방식으로 동작한다. 이전의 클라이언트 컴포넌트 방식을 사용하고 싶다면, `'use client'`라는 디렉티브를 스크립트 최상단에 추가해주면 된다.
+
+여기서 `'use client'` 디렉티브는 “서버 컴포넌트와 클라이언트 컴포넌트간의 경계”를 지정하는 것을 의미한다.
+
+```jsx
+"use client";
+
+const ClientComponent = () => {
+  const [state, setState] = useState();
+  return <div>...</div>;
+};
+export default ClientComponent;
+```
+
+`'use client'`를 잘못 사용할 경우 경고가 발생할 수 있다. 예를 들어 부모 요소에서 `'use client'`를 사용하면 부모는 클라이언트 컴포넌트로 취급되고, 자식 요소도 클라이언트 컴포넌트로 취급된다. 이때 자식 요소에 다시 `'use client'`를 추가할 필요가 없기 때문에 경고가 나타날 수 있다.
+
+<CustomImage
+  src="https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/rsc_2.png"
+  alt="image"
+/>
+
+<CustomImage
+  src="https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/rsc_3.png"
+  alt="image"
+/>
+
+[관련 이슈](https://github.com/vercel/next.js/discussions/46795)
+
+### Streaming HTML?
+
+스트리밍 HTML은 전체 HTML 문서를 한번에 전송하는 대신, 부분적으로 나누어 전송하는 방식이다. 브라우저는 이러한 조각들을 받아들이면서도 동시에 렌더링할 수 있다. 이를 통해 보다 빠르게 페이지가 보여질 수 있다.
+
+아래의 영상은 기존의 static HTML과 Streaming HTML의 차이를 보여준다.
+
+<Video src="https://videopress.com/embed/vjw2IBfA" />
+
+[Streaming HTML](https://frontendmasters.com/blog/streaming-html/)
+
+Next.js의 App Router에서는 RSC를 사용하면 Streaming HTML을 사용할 수 있다.
+
+---
+
+## 서버 컴포넌트 렌더링 과정
+
+Next.js는 서버 단에서 React의 API를 사용해 렌더링을 조정한다. 렌더링 작업은 개별 라우트 세그먼트와 [서스펜스 바운더리(Suspense Boundaries)](https://react.dev/reference/react/Suspense)를 기준으로 청크 단위로 분할되어 진행된다.
+
+각각의 청크는 두 단계로 렌더링된다.
+
+1. React는 서버 컴포넌트를 **React Server Component Payload(RSC Payload)**라 불리는 특별한 데이터 형식으로 렌더링한다.
+2. Next.js는 **RSC Payload**와 클라이언트 컴포넌트 JavaScript Instructions를 사용해 서버에서 HTML을 렌더링한다.
+
+이후 클라이언트 단에서,
+
+1. **HTML**은 상호작용이 없는 해당 경로에 대한 미리보기를 빠륵 보여주는데 사용한다. 이는 초기 페이지 로드를 위해서만 사용된다.
+2. **React Server Components Payload(RSC Payload)**는 클라이언트와 서버 컴포넌트 트리를 재조정하고, DOM을 업데이트하는데 사용된다.
+3. **Javascript Instructions**는 클라이언트 컴포넌트를 [hydrate](https://react.dev/reference/react-dom/client/hydrateRoot)하고, 앱이 상호작용할 수 있도록 하는데 사용된다.
+
+---
+
+### RSC Payload (RSC)?
+
+RSC Payload는 렌더링된 React Server Component(RSC) Tree를 간소화하여 표현한 이진 형식의 데이터이다. React가 클라이언트 단에서 브라우저의 DOM을 업데이트하는데 사용된다.
+
+<CustomImage
+  src="https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/rsc_4.png"
+  alt="image"
+/>
+
+위 사진에서 id가 `B:0`, `S:0` 인 요소가 **placeholder** 역할을 하며, 클라이언트 컴포넌트가
+렌더링되기 전까지 공간을 차지하고 있다가, 렌더링이 이루어지면 해당 요소 자리를 렌더링
+결과물이 대체하게 된다.
+
+**RSC Payload**에는 다음 항목들이 포함된다.
+
+- 서버 컴포넌트들의 렌더링 결과
+- _클라이언트 컴포넌트가 렌더링되어야 할 위치(placeholder)와 해당 JavaScript 파일에 대한 참조_
+- 서버 컴포넌트에서 클라이언트 컴포넌트로 전달되는 모든 Props
+
+아래는 **RSC Payload**를 단순화한 예시이다.
+
+```jsx
+{
+  "0": [
+    "style",
+    "/_next/static/css/main.css"
+  ],
+  "1": [
+    "script",
+    "/_next/static/js/main.js"
+  ],
+  "2": [
+    "div",
+    {
+      "children": [
+        ["h1", {"children": "Hello, Server Component!"}],
+        ["p", {"children": "This is rendered on the server."}]
+      ]
+    }
+  ],
+  "3": [
+    "ClientComponent",
+    {
+      "id": "client-component-1",
+      "props": {"message": "Hello from the Client Component!"}
+    }
+  ],
+  "4": [
+    "script",
+    "/_next/static/js/chunk-client-component.js"
+  ],
+  "$type": "payload",
+  "$version": 1
+}
+```
+
+---
+
+## RSC의 장단점
+
+### 장점
+
+- **데이터 패칭**
+
+  서버 컴포넌트를 사용하면 데이터 가져오기를 서버에서 수행하여 데이터 소스와 가까운 위치에서 처리할 수 있다. 이를 통해 렌더링에 필요한 데이터를 가져오는 시간을 단축하고, 클라이언트에서 발생하는 요청 횟수를 줄여 성능을 향상시킬 수 있다.
+
+- **보안**
+
+  서버 컴포넌트를 사용하면 토큰이나 API 키와 같은 민감한 정보나 로직을 서버에 두며, 이를 클라이언트에 노출할 위험 없이 안전하게 관리할 수 있다.
+
+- **캐싱**
+
+  서버에서 렌더링하면 그 결과를 캐싱하여 이후 요청 및 여러 사용자 간에 재사용할 수 있다. 이를 통해 각 요청마다 수행되는 렌더링과 데이터 가져오기 작업을 줄여 성능을 향상시키고 비용을 절감할 수 있다.
+
+- **성능**
+
+  서버 컴포넌트는 기본적인 성능 최적화 도구를 추가로 제공한다. 예를 들어, 전체가 클라이언트 컴포넌트로 구성된 앱에서, 상호작용이 필요 없는 UI 요소를 서버 컴포넌트로 이동시키면 클라이언트에서 필요한 JavaScript의 양을 줄일 수 있다. 이는 인터넷 속도가 느리거나 성능이 낮은 기기를 사용하는 사용자에게 유리하며, 브라우저가 다운로드, 파싱, 실행해야 할 JavaScript가 줄어들어 전반적인 성능이 개선된다.
+
+- **초기 페이지 로드 및 초기 컨텐츠 페인트(FCP)**
+
+  서버에서 HTML을 생성하면 클라이언트가 페이지를 렌더링하는 데 필요한 JavaScript를 다운로드, 파싱, 실행하기 전에 사용자에게 즉시 페이지를 표시할 수 있다. 이를 통해 초기 로딩 속도가 빨라지고, First Contentful Paint(FCP) 시간이 단축된다.
+
+- **검색 엔진 최적화 및 소셜 네트워크 공유**
+
+  서버에서 렌더링된 HTML은 검색 엔진 봇이 페이지를 색인하는 데 사용될 수 있으며, 소셜 네트워크 봇이 페이지의 미리보기 카드(social card)를 생성하는 데 활용될 수 있다.
+
+- **스트리밍**
+
+  서버 컴포넌트를 사용하면 렌더링 작업을 여러 청크로 분할하고, 준비된 부분부터 클라이언트로 스트리밍할 수 있다. 이를 통해 사용자는 전체 페이지가 서버에서 렌더링될 때까지 기다리지 않고, 먼저 준비된 부분을 빠르게 확인할 수 있다
+
+### 단점
+
+- 브라우저 API 사용 불가
+- useEffect 등의 React 훅 사용 불가
+  - 위 단점을 극복하기 위해서는 클라이언트 컴포넌트 사용 필요
+
+---
+
+## SSR과 RSC의 차이
+
+<CustomImage
+  src="https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/rsc_5.png"
+  alt="image"
+/>
+
+### SSR
+
+1. 서버에서 전체를 렌더링하고, HTML을 생성
+2. 생성한 HTML을 DOM에 반영하고, 클라이언트 측에서 표시
+3. JavaScript 하이드레이션
+
+### RSC
+
+1. 서버 측에서 서버 컴포넌트를 렌더링
+2. 렌더링 과정에서 RSC Payload를 생성, Next.js는 RSC Payload와 JS Instructions를 활용하여 서버단에서 HTML 렌더링
+3. 이후 HTML과 RSC Payload를 스트림 형태(Streaming SSR)로 클라이언트로 전달.
+4. 클라이언트 단에서 HTML을 활용해 초기 페이지를 보여주고, RSC Payload를 사용하여 클라이언트와 서버 컴포넌트 트리를 재조정하고 DOM을 업데이트
+
+### **Streaming SSR**
+
+**Streaming SSR**은 서버 측에서 렌더링을 점진적으로 진행하는 방식으로, 사용자에게 빠르게 페이지를 표시할 수 있도록 돕는 기술이다. 주요 특징은 **가장 빠르게 렌더링할 수 있는 부분**을 우선적으로 표시하고, 나머지 부분은 서버에서 순차적으로 스트리밍하는 것이다. 이 과정에서 **Suspense**, **코드 분할**, **스트리밍 HTML**, **선택적 하이드레이션**과 같은 기술이 활용된다.
+
+> **스트리밍 HTML**
+>
+> 기존 방식에서는 컴포넌트의 데이터 패칭이 완료되기 전까지 기다려야 했지만, 스트리밍 HTML에서는 데이터 패칭을 기다리지 않고 > 먼저 HTML을 전송하고, 데이터가 준비되면 해당 컴포넌트를 점진적으로 스트리밍하여 사용자에게 보낼 수 있다.
+>
+> **선택적 하이드레이션**
+>
+> 모든 HTML과 JavaScript 코드가 다운로드되기 전에 사용자와의 상호작용이 중요한 부분부터 하이드레이션을 시작한다.
+
+React 18은 Suspense와 통합하여 **스트리밍 HTML**과 **선택적 하이드레이션** 기능을 사용할 수 있다. 이러한 기능은 React에 기존에 없던 동시성을 부여한다고 볼 수 있다. 이러한 기능과 RSC를 통합하면 렌더링 과정에서 병렬성을 활용해 렌더링 퍼포먼스를 비약적으로 향상할 수 있다.
+
+<CustomImage
+  src="https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/rsc_6.png"
+  alt="image"
+/>
+
+기존 SSR 방식은 애플리케이션의 기본 구조를 서버에서 렌더링한 후 클라이언트로 전송하고, 클라이언트는 이를 하이드레이션한다.
+
+반면, Streaming SSR에서는 서버가 병렬적으로 데이터 패칭을 진행하고, 완성된 콘텐츠를 클라이언트에 전송하여 클라이언트가 이를 받아 하이드레이션을 진행한다. 이 방식은 클라이언트가 하이드레이션을 하는 동안에도 서버는 데이터 패칭을 계속해서 진행할 수 있어 페이지를 더 빠르게 렌더링할 수 있다.
+
+<CustomImage
+  src="https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/rsc_7.png"
+  alt="image"
+/>
+
+컴포넌트 관점에서 보면 Streaming SSR은 각 컴포넌트가 독립적으로 렌더링 할 수 있다. 예를 들어 Component A는 Component B가 렌더링되기를 기다리지 않고 독립적으로 렌더링을 진행할 수 있다. 이를 통해 렌더링 병목 현상을 줄이고, 더 빠른 렌더링을 할 수 있다.
