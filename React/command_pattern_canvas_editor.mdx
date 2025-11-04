@@ -1,0 +1,220 @@
+---
+title: "캔버스 에디터에 Command Pattern 도입하기"
+description: "이미지 에디터의 Undo/Redo를 전체 스냅샷으로 구현했다가 성능 문제를 겪고, Command Pattern으로 바꾼 과정"
+tags: ["javascript", "design-pattern", "canvas"]
+date: 2025-11-02 21:03:49
+thumbnail: "https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/canvas.png"
+---
+
+Konva 기반으로 AI 이미지 에디터를 만들고 있었다. 지우개로 영역을 칠하고, 크롭하고, AI로 이미지를 생성하면 결과가 캔버스에 반영되는 구조다. 당연히 Undo/Redo가 필요했다.
+
+---
+
+## 상황
+
+처음에는 가장 간단한 방법을 택했다. Zustand 스토어의 전체 상태를 배열에 저장하는 방식이었다. 변경이 일어날 때마다 현재 상태의 스냅샷을 히스토리 배열에 push하고, Undo하면 이전 스냅샷으로 돌아간다.
+
+작은 상태에서는 잘 동작했다. 하지만 이미지 에디터의 상태는 작지 않았다. 캔버스 위의 이미지 레이어, 브러시로 그린 수백 개의 선, 크롭 영역, 변환 정보까지 포함하면 하나의 스냅샷이 꽤 무겁다. 브러시를 한 획 그을 때마다 이 전체 상태가 복사되어 히스토리에 쌓였고, 메모리 사용량이 빠르게 늘면서 Undo 반응도 눈에 띄게 느려졌다.
+
+---
+
+## 원인
+
+원인을 따져보면 간단했다. 변경되지 않은 부분까지 매번 통째로 복사하고 있었다. 브러시 한 획을 그었을 뿐인데, 캔버스의 모든 레이어와 크롭 정보와 다른 선들까지 전부 복사되는 구조였다.
+
+그러면 전체 상태 대신 변경분만 저장하면 되지 않을까. 브러시를 그었으면 그 선의 좌표만, 크롭했으면 바뀐 영역 정보만 저장하고, Undo할 때 그 변경을 되돌리면 된다. 각 동작의 실행/취소 로직을 객체로 캡슐화하는 방식 — GoF의 Command Pattern이 딱 이 구조다.
+
+---
+
+## Command Pattern으로 변경분만 저장하기
+
+인터페이스는 간단하다. `execute()`와 `undo()` 두 메서드만 있으면 된다.
+
+```typescript
+export interface Command {
+  execute(): void | Promise<void>;
+  undo(): void;
+}
+```
+
+`CommandManager`는 이 Command 객체들을 배열로 관리한다. 새 Command가 실행되면 현재 인덱스 이후의 히스토리를 잘라내고 추가한다. Undo하면 현재 Command의 `undo()`를 호출하고 인덱스를 감소시킨다.
+`CommandManager`는 모듈 레벨에서 Singleton으로 하나만 두었다.
+
+```typescript
+export class CommandManager {
+  private history: Command[];
+  private currentIndex: number;
+
+  async execute(command: Command) {
+    // 현재 인덱스 이후의 히스토리 제거 (redo 스택 초기화)
+    this.history = this.history.slice(0, this.currentIndex + 1);
+
+    await command.execute();
+    this.history.push(command);
+    this.currentIndex++;
+
+    // 최대 100개 제한
+    if (this.history.length > MAXIMUM_HISTORY_SIZE) {
+      this.history.shift();
+      this.currentIndex--;
+    }
+    this.notify();
+  }
+
+  undo() {
+    if (this.canUndo()) {
+      const command = this.history[this.currentIndex];
+      command.undo();
+      this.currentIndex--;
+      this.notify();
+    }
+  }
+}
+```
+
+에디터에서 Undo 가능한 동작마다 별도의 Command 클래스를 만들었다.
+
+### DrawLine: 브러시/지우개 한 획
+
+가장 자주 발생하는 동작이다. 브러시 한 획의 좌표 배열을 `execute()`에서 추가하고, `undo()`에서 제거한다.
+
+```typescript
+export class DrawLine implements Command {
+  private line: Line;
+  private setLines: Dispatch<SetStateAction<Line[]>>;
+
+  execute(): void {
+    this.setLines((prev) => [...prev, this.line]);
+  }
+
+  undo(): void {
+    this.setLines((prev) => prev.slice(0, -1));
+  }
+}
+```
+
+전체 상태 스냅샷이었다면 캔버스의 모든 레이어, 크롭 정보, 다른 선들까지 전부 복사해야 했다. 여기서는 추가된 선 하나만 들고 있으면 된다.
+
+`replace` 모드도 있다. AI 인페인팅 결과를 적용할 때 기존 선을 모두 지우고 새 결과로 교체해야 하는데, 이때는 `previousLines`를 저장해두고 Undo 시 복원한다.
+
+### SetCropBounds: 크롭 영역 변경
+
+크롭 핸들을 드래그하면 영역이 변경된다. 이전 bounds와 새 bounds를 저장해서 Undo 시 이전 크롭 영역으로 되돌린다.
+
+```typescript
+export class SetCropBounds implements Command {
+  private oldBounds?: Bounds;
+  private newBounds: Bounds;
+
+  execute(): void {
+    // execute 시점에 현재 bounds를 oldBounds로 저장
+    this.oldBounds = targetImage.cropBounds;
+    targetImage.cropBounds = this.newBounds;
+  }
+
+  undo(): void {
+    targetImage.cropBounds = this.oldBounds;
+  }
+}
+```
+
+### AddImage: 이미지 추가
+
+AI 지우개(inpainting)나 생성형 채우기(outpainting) 결과를 캔버스에 추가하는 동작이다. 이미지 레이어 배열에 새 레이어를 추가하고, Undo 시 마지막 레이어를 제거한다.
+
+```typescript
+export class AddImage implements Command {
+  private src: string;
+  private origin: "initial" | "edit" | "ai_generation" | "inpainting";
+
+  execute(): void {
+    this.setImages((prev) => [
+      ...prev,
+      {
+        origin: this.origin,
+        src: this.src,
+        cropBounds: this.cropBounds,
+      },
+    ]);
+  }
+
+  undo(): void {
+    this.setImages((prev) => prev.slice(0, -1));
+  }
+}
+```
+
+여기까지 하면 성능 문제는 해결된다. 그런데 구현하다 보니 다른 문제가 생겼다.
+
+---
+
+## 동시에 여러 작업이 진행되는 케이스
+
+크롭을 확정하면 내부적으로 두 가지 동작이 동시에 일어난다. 크롭 영역 설정(`SetCropBounds`)과 이미지 변환(`SetTransform`)이다.
+
+이 둘을 따로 Undo 할 수 있으면 상태가 꼬인다. 크롭 영역은 바뀌었는데 이미지는 안 바뀐, 그런 중간 상태가 생긴다.
+
+사용자 입장에서 "크롭 확정"은 하나의 동작이니, Undo도 하나의 동작으로 취소되어야 한다. 여러 Command를 하나로 묶을 수 있어야 했다.
+
+`CombineCommand`는 execute/undo가 항상 같이 실행되도록 여러 Command를 감싼다.
+
+```typescript
+export class CombineCommand implements Command {
+  commands: Command[] = [];
+
+  constructor(...commands: Command[]) {
+    this.commands = commands;
+  }
+
+  async execute(): Promise<void> {
+    for (const command of this.commands) {
+      await command.execute();
+    }
+  }
+
+  undo(): void {
+    this.commands.forEach((command) => command.undo());
+  }
+}
+```
+
+사용하면 이런 모양이 된다.
+
+```typescript
+const command = new CombineCommand(
+  new SetCropBounds(newBounds, ...),
+  new SetTransform(newSrc, ...)
+)
+await commandManager.execute(command)
+```
+
+---
+
+## 도구를 효율적으로 관리하기
+
+Command를 만드는 건 좋은데, 그걸 누가 만드느냐가 문제였다. 지우개, 크롭, AI 생성 등 도구마다 캔버스 이벤트 핸들링이 다르다. 처음에는 하나의 컴포넌트에서 현재 도구에 따라 분기하는 식으로 작성했는데, 도구가 늘어날수록 분기문이 복잡해졌다.
+
+각 도구를 독립된 객체로 분리하고, 공통 인터페이스로 캔버스 이벤트를 위임하는 구조를 만들었다.
+
+```typescript
+export interface Tool {
+  name: ToolType;
+  cursor: string;
+  onPointerDown?: (ctx: ToolContext, e: KonvaEventObject<PointerEvent>) => void;
+  onPointerMove?: (ctx: ToolContext, e: KonvaEventObject<PointerEvent>) => void;
+  onPointerUp?: (ctx: ToolContext, e: KonvaEventObject<PointerEvent>) => void;
+  Overlay: React.FC<{ ctx: ToolContext }>;
+}
+```
+
+각 Tool은 `ToolContext`를 통해 `CommandManager`에 접근한다. 지우개 도구는 `onPointerUp`에서 `DrawLine` Command를 생성해서 `commandManager.execute()`를 호출하고, 크롭 도구는 확정 시 `CombineCommand`를 생성한다.
+
+새 도구를 추가할 때 기존 코드를 건드릴 필요가 없다. Tool 인터페이스를 구현한 객체 하나 만들어서 등록하면 된다.
+
+---
+
+## 마무리
+
+전체 스냅샷 방식은 구현이 간단해서 처음에 선택했지만, 이미지 에디터처럼 상태가 무거운 도메인에서는 금방 한계가 왔다.
+
+Command Pattern으로 바꾸면서 성능 문제가 해결됐고, 부수적으로 코드 구조도 정리됐다. 각 동작이 독립된 객체이니 새 도구를 만들 때 해당 Command만 구현하면 되고, CombineCommand로 복합 동작도 원자적으로 처리할 수 있다. Undo/Redo를 제대로 만들려면 결국 상태 변경을 어떻게 표현할 것인가를 먼저 정해야 한다는 걸, 삽질하면서 배웠다.
