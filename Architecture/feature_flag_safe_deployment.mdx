@@ -1,0 +1,126 @@
+---
+title: "6명이 하나의 브랜치에서 안전하게 배포하기"
+description: "체리픽 배포에서 미완성 기능이 프로덕션에 노출되는 사고가 터졌다. 환경변수 하나로 해결한 이야기."
+tags: ["frontend", "feature-flag", "deployment"]
+date: 2026-01-10 00:30:12
+thumbnail: "https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/feature-flag.png"
+---
+
+프론트엔드 개발자 6명이 하나의 모노레포에서 작업하고 있었다. 각자 다른 기능을 만들면서 `develop`에 머지하고, 배포할 때는 `release` 브랜치로 체리픽하는 구조.
+
+언뜻 보면 합리적이었다. 근데 체리픽 과정에서 미완성 기능이 프로덕션에 노출될 수 있다는 불안이 항상 있었다. 실제로 한 번 터지고 나서야 이걸 제대로 해결해야겠다고 생각했다.
+
+---
+
+## 문제: 체리픽의 한계
+
+문제는 서브 프로젝트들이 완전히 독립적이지 않다는 점이었다. 공유 컴포넌트를 수정하거나 라우팅 구조를 건드리면 다른 사람의 코드에 영향이 간다. 체리픽할 때 싱크가 안 맞으면 충돌이 나고, 그 충돌을 해결하다가 의도치 않은 코드가 딸려 올라가기도 했다.
+
+서브 프로젝트를 독립적으로 개발하면 좋겠지만, 현실적으로 공유하는 코드가 너무 많았다. 체리픽 자체를 없앨 방법이 필요했다.
+
+---
+
+## Feature Flag
+
+리서치를 하다가 Feature Flag라는 개념을 알게 됐다.
+
+Feature Flag 하면 LaunchDarkly나 Firebase Remote Config 같은 서비스가 먼저 떠오르는데, 우리한테 필요한 건 `dev`와 `prod` 환경 분기뿐이었다. 세그먼트별 롤아웃이나 실시간 토글은 필요 없었다. 그냥 환경변수 하나로 기능을 조건부 노출하면 충분했다. SDK도 필요 없고, Vercel이나 GitHub Actions에서 환경변수만 바꿔주면 되니까 추가 비용도 없었다.
+
+`develop` 환경에서는 모든 기능이 보이고, `production`에서는 완성된 기능만 보이도록 플래그를 설정한다. 이러면 체리픽이 필요 없다. `develop`을 그대로 `release`로 올려도 미완성 기능은 프로덕션에서 안 보인다. 기능이 완성되면 플래그만 제거하면 된다.
+
+---
+
+## 설계하기
+
+구현은 단순하게 갔다. `NEXT_PUBLIC_ENV` 환경변수 하나로 현재 환경을 구분하고, 그 위에 유틸리티 몇 개를 얹었다.
+
+```tsx
+// feature-flag.tsx
+
+type EnvType = "development" | "production";
+
+const currentEnv = (process.env.NEXT_PUBLIC_ENV ?? "development") as EnvType;
+
+export const isEnv = (env: EnvType | EnvType[]) => {
+  const envs = Array.isArray(env) ? env : [env];
+  return envs.includes(currentEnv);
+};
+
+export const isDevelopment = isEnv("development");
+export const isProduction = isEnv("production");
+```
+
+`isEnv()`는 현재 환경이 특정 환경인지 확인한다. 배열도 받을 수 있어서 `isEnv(["development", "staging"])` 같은 표현도 된다. `isDevelopment`와 `isProduction`은 자주 쓰니까 미리 계산해 뒀다.
+
+특정 환경에서만 함수를 실행해야 할 때를 위해 고차함수도 만들었다.
+
+```tsx
+export const onlyInEnv = (env: EnvType | EnvType[]) => {
+  return <T extends (...args: any[]) => any>(fn: T): T | (() => void) => {
+    if (isEnv(env)) return fn;
+    return () => {};
+  };
+};
+```
+
+JSX에서 조건부 렌더링이 필요할 때는 `<OnlyInEnv>` 컴포넌트를 썼다.
+
+```tsx
+export const OnlyInEnv = ({
+  targetEnv,
+  children,
+}: {
+  targetEnv: EnvType | EnvType[];
+  children: React.ReactNode;
+}) => {
+  if (!isEnv(targetEnv)) return null;
+  return <>{children}</>;
+};
+```
+
+전체 코드가 파일 하나, 수십 줄. 설명할 것도 별로 없다.
+
+---
+
+## 적용하기
+
+가장 많이 쓴 패턴은 탭이나 메뉴를 숨기는 것이었다. 아직 개발 중인 음악/오디오 탭, 리워드 카드 같은 기능은 프로덕션에서 보이면 안 됐다. 네비게이션 설정에 `hidden: isProduction`만 추가하면 끝.
+
+```tsx
+const tabs = [
+  { label: "채팅", path: "/chat" },
+  { label: "음악", path: "/music", hidden: isProduction },
+  { label: "리워드", path: "/reward", hidden: isProduction },
+];
+```
+
+화면 단위로 통째로 숨겨야 할 때는 `<OnlyInEnv>`로 감쌌다.
+
+```tsx
+<OnlyInEnv targetEnv={["development"]}>
+  <BetaFeature />
+</OnlyInEnv>
+```
+
+외부 서비스 연동에도 유용했다. 개발 환경에서는 디버그 로거만 돌리고, 프로덕션에서는 Mixpanel, FullStory 같은 서비스를 초기화하는 식이다.
+
+```tsx
+const initAnalytics = onlyInEnv("production")(() => {
+  Mixpanel.init(MIXPANEL_TOKEN);
+  FullStory.init(FULLSTORY_ORG_ID);
+});
+
+const initDebugLogger = onlyInEnv("development")(() => {
+  console.log("[Debug] Analytics disabled in development");
+});
+```
+
+도입 이후 10개 넘는 파일에서 이 유틸리티를 쓰게 됐다. 각자 자기 기능에 플래그를 붙이고, 완성되면 제거하는 흐름이 자연스럽게 자리잡았다.
+
+---
+
+## 마무리
+
+그 뒤로 체리픽이 사라졌다. `develop`에서 작업하고, 준비되면 그대로 `release`로 머지한다. 미완성 기능은 플래그가 숨겨준다. 환경변수 하나, 유틸 함수 몇 개로 6명이 서로 발목 안 잡고 배포할 수 있게 됐다.
+
+해결책 자체는 별거 아니었다. 오히려 왜 진작 안 했나 싶다. 체리픽할 때마다 "빠뜨린 거 없나" 확인하느라 쓰던 시간, 배포 담당자한테 몰리던 부담. 다 알면서도 "지금까지 잘 됐으니까"로 넘기고 있었다. 결국 한 번 터져야 움직이게 되더라.
