@@ -1,0 +1,199 @@
+---
+title: "낙관적 업데이트로 불필요한 서버 요청을 제거하기"
+description: "AI 에셋 생성처럼 수 분이 걸리는 비동기 작업에서, 서버 응답을 기다리지 않고 React Query 캐시를 즉시 업데이트하여 불필요한 refetch를 제거한 설계 과정을 정리한 글이다."
+tags: ["react", "react-query", "optimistic-update"]
+date: 2026-02-12 22:15:32
+thumbnail: "https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/optimistic-update.png"
+---
+
+AI 이미지 생성 기능의 QA 과정에서 이런 피드백을 받았다.
+
+> "생성 완료됐다고 떴는데, 에셋 리스트에 바로 안 보여요."
+
+생성은 정상적으로 완료되었지만, 에셋 리스트가 갱신되지 않아 사용자 눈에는 아무 일도 일어나지 않은 것처럼 보이고 있었다. 무료 횟수도 그대로였다. 서버에서는 이미 차감되었지만, 클라이언트가 아직 그 사실을 모르는 상태였다.
+
+---
+
+## 문제
+
+AI 에셋을 하나 생성하는 동작에 관련된 클라이언트 상태는 여러 개였다.
+
+| 상태                   | 역할                       | React Query Key                          |
+| ---------------------- | -------------------------- | ---------------------------------------- |
+| 에셋 리스트 (image 탭) | 생성된 이미지 목록         | `["ai-assets", "image", "infinite"]`     |
+| 에셋 리스트 (all 탭)   | 전체 에셋 목록             | `["ai-assets", "all", "infinite"]`       |
+| 무료 횟수              | 모델별 남은 생성 횟수      | `[IMAGE_MODEL_COUNTS_QUERY_KEY]`         |
+| 생성 히스토리          | 생성 요청 기록             | `["image-generations"]`                  |
+| 진행 상태              | 상단 배너의 "생성 중" 표시 | `[LATEST_GENERATION_QUERY_KEY, "image"]` |
+
+기존 방식에서는 생성 요청을 보낸 뒤 Firestore에서 완료 이벤트가 올 때까지 기다리고, 그때 `invalidateQueries`로 모든 쿼리를 refetch했다. 문제는 AI 생성이 완료될 때까지 수십 초 동안 이 상태들이 **이전 값에 머물러 있다**는 것이었다.
+
+사용자 시점에서 보면 이런 상황이 벌어진다.
+
+1. 생성 버튼을 누른다.
+2. 무료 횟수가 줄어들지 않는다. → "정말 차감된 건가?"
+3. 에셋 리스트에 아무것도 안 뜬다. → "생성이 시작은 된 건가?"
+4. 히스토리에도 기록이 없다. → "요청이 들어간 건 맞나?"
+5. 수십 초 후 완료되면 갑자기 모든 상태가 동시에 바뀐다.
+
+느린 것과 고장난 것은 다르다. 그런데 UI가 그 차이를 보여주지 못하면, 사용자는 둘을 구분할 수 없다.
+
+원인은 단순했다. 서버 응답이 오기 전까지 클라이언트 상태가 갱신되지 않았던 것이다. AI 에셋 생성은 수십 초에서 수 분이 걸리는 작업이라, 그동안 UI와 서버 상태가 어긋나는 건 당연했다. 그래서 낙관적 업데이트(Optimistic Update)를 사용했다. 서버 응답을 기다리지 않고, 생성 요청이 성공한 직후 클라이언트 상태를 먼저 갱신하는 방식이다.
+
+---
+
+## 구현
+
+생성 요청이 성공하면 `setQueryData`로 관련 캐시를 즉시 업데이트한다. 이 로직은 `useGenerateV2` 훅에서 처리한다.
+
+### 캐시 즉시 업데이트
+
+#### 에셋 리스트: 빈 에셋 객체를 먼저 삽입
+
+생성 요청이 성공하면, `imageUrl`이 빈 문자열(`""`)인 `ImageAsset` 객체를 만들어 리스트의 첫 번째 페이지 최상단에 삽입한다. UI에서는 `imageUrl`이 비어있으면 로딩 스켈레톤을 렌더링한다.
+
+```tsx
+const newImageAsset: ImageAsset = {
+  id: result.generationId,
+  assetType: "image",
+  imageUrl: "", // 빈 문자열 = 아직 생성 중
+  createdAt: new Date(),
+  updatedAt: new Date(),
+  metadata: {
+    origin: "ai-generated",
+    prompt: params.prompt,
+    model: params.model,
+    generationId: result.generationId,
+  },
+};
+
+queryClient.setQueryData(["ai-assets", "image", "infinite"], (oldData) => ({
+  ...oldData,
+  pages: oldData.pages.map((page, index) =>
+    index === 0 ? { ...page, data: [newImageAsset, ...page.data] } : page,
+  ),
+}));
+```
+
+핵심은 `metadata.generationId`다. 이 값이 나중에 서버에서 생성이 완료되었을 때, 리스트에서 **어떤 에셋을 실제 이미지로 교체해야 하는지** 식별하는 키 역할을 한다.
+
+같은 로직으로 `["ai-assets", "all", "infinite"]` 캐시에도 동일한 객체를 삽입한다.
+
+#### 무료 횟수: 즉시 차감
+
+모델별 사용량을 관리하는 캐시에서 `used`를 1 증가, `remaining`을 1 감소시킨다.
+
+```tsx
+queryClient.setQueryData([IMAGE_MODEL_COUNTS_QUERY_KEY], (old) => ({
+  ...old,
+  [params.model]: {
+    ...old[params.model],
+    used: old[params.model].used + 1,
+    remaining: Math.max(old[params.model].remaining - 1, 0),
+  },
+}));
+```
+
+사용자가 버튼을 누르는 순간 숫자가 바뀌므로, "차감되었다"는 피드백이 즉각적으로 전달된다.
+
+#### 히스토리 및 진행 상태
+
+히스토리 캐시에는 `status: "pending"`인 `ImageAssetGeneration` 객체를 추가한다. 그리고 `LATEST_GENERATION_QUERY_KEY`를 업데이트하여 상단 InProgressBanner가 즉시 "생성 중" 상태를 감지할 수 있도록 했다.
+
+이 `setQueryData` 호출들은 생성 API 응답을 받은 직후 **동기적으로 실행**된다. 사용자 입장에서는 버튼을 누르고 잠시 후 모든 UI가 일관되게 바뀐다.
+
+### generationId로 실제 데이터 교체하기
+
+낙관적으로 삽입한 빈 에셋은 결국 실제 생성 결과로 교체되어야 한다. 이 동기화를 **Zustand 스토어 + Firestore `onSnapshot`** 조합으로 처리했다.
+
+#### 모듈 레벨 Firestore 구독
+
+`setQueryData` 실행 직후, Zustand 스토어의 `track()` 메서드를 호출하여 해당 `generationId`의 Firestore 문서를 구독한다.
+
+```tsx
+// 생성 요청 성공 후
+useGenerationTaskStore.getState().track(uid, result.generationId);
+```
+
+이 구독은 **모듈 레벨**에서 관리된다. React 컴포넌트의 마운트/언마운트와 무관하게 동작하기 때문에, 사용자가 사이드 패널을 닫거나 다른 페이지로 이동해도 구독이 유지된다.
+
+```tsx
+// store.ts — 모듈 레벨 구독 관리
+const subscriptions = new Map<string, Unsubscribe>();
+
+const unsub = onSnapshot(docRef, (snapshot) => {
+  const data = snapshot.data();
+  const task = { ...data, id: snapshot.id } as AssetGeneration;
+
+  // Zustand 스토어 업데이트
+  set((state) => ({
+    tasks: { ...state.tasks, [generationId]: task },
+  }));
+
+  // 완료 또는 실패 시 구독 자동 해제
+  if (data.status === "completed" || data.status === "failed") {
+    cleanupSubscription(generationId);
+  }
+});
+```
+
+#### 완료 시: generationId로 에셋 매칭
+
+Zustand 스토어의 상태 변화를 감지하는 `useGenerationTaskEffects` 훅이 루트 레벨에서 동작한다. `status`가 `"completed"`로 바뀌면, `generationId`를 기준으로 캐시에서 해당 에셋을 찾아 실제 이미지 URL로 교체한다.
+
+```tsx
+// useGenerationTask.ts — 완료 시 캐시 업데이트
+queryClient.setQueryData(["ai-assets", "image", "infinite"], (oldData) => ({
+  ...oldData,
+  pages: oldData.pages.map((page) => ({
+    ...page,
+    data: page.data.map((asset) => {
+      const isMatch = asset.metadata?.generationId === generationId;
+      return isMatch
+        ? { ...asset, imageUrl: task.generatedImageUrl || "" }
+        : asset;
+    }),
+  })),
+}));
+```
+
+`metadata.generationId`가 일치하는 에셋을 찾아 `imageUrl`을 실제 생성된 이미지 URL로 교체한다. 사용자는 스켈레톤이 실제 이미지로 바뀌는 것을 자연스럽게 볼 수 있다.
+
+### 실패 시 복구
+
+낙관적 업데이트에서 반드시 고려해야 하는 것이 실패 시 복구다. 모든 캐시를 일괄적으로 이전 상태로 되돌리는 방식을 처음에 생각했지만, 실제로는 **캐시마다 복구 전략이 달라야** 했다.
+
+#### 에셋 리스트 / 히스토리: generationId로 제거
+
+Firestore 구독이 `status: "failed"`를 감지하면, `generationId`를 기준으로 캐시에서 해당 에셋을 **필터링하여 제거**한다.
+
+```tsx
+// useGenerationTask.ts — 실패 시 캐시에서 제거
+queryClient.setQueryData(["ai-assets", "image", "infinite"], (oldData) => ({
+  ...oldData,
+  pages: oldData.pages.map((page) => ({
+    ...page,
+    data: page.data.filter(
+      (asset) => asset.metadata?.generationId !== generationId,
+    ),
+  })),
+}));
+```
+
+이전 상태를 저장해뒀다가 통째로 되돌리는 방식이 아니라, 실패한 에셋만 정확히 골라서 빼는 방식이다. 그 사이 다른 에셋이 추가되었더라도 영향을 받지 않는다.
+
+#### 무료 횟수: invalidateQueries
+
+무료 횟수는 에셋 리스트처럼 `generationId`로 특정 항목을 제거하는 것이 불가능하다. 숫자 값이기 때문이다. 따라서 `invalidateQueries`로 서버의 실제 값을 다시 가져온다. 서버에서는 생성이 실패했으므로 횟수를 차감하지 않은 상태이고, refetch 결과로 원래 값이 복원된다.
+
+`generationId`로 항목을 특정할 수 있는 캐시(에셋 리스트, 히스토리)는 해당 항목만 제거하고, 집계 값인 무료 횟수는 서버에서 다시 가져오는 식으로 나눴다.
+
+---
+
+## 마무리
+
+처음에는 React Query 공식 문서의 패턴대로 `onMutate`에서 스냅샷을 저장하고, 실패 시 통째로 롤백하려 했다. 그런데 캐시마다 성격이 달라서 그 패턴이 맞지 않았다. 에셋 리스트는 항목 단위로 삽입하고 제거할 수 있지만, 무료 횟수 같은 집계 값은 서버에서 다시 가져오는 수밖에 없었다.
+
+이 구조를 하나로 묶어주는 게 `generationId`다. 캐시 삽입, Firestore 구독, 완료 시 교체, 실패 시 제거까지 전부 이 키 하나로 추적한다. 이게 없었으면 어떤 스켈레톤이 어떤 생성 결과에 대응하는지 알 수 없었을 것이다.
+
+수십 초 동안 UI가 멈춰 있으면 사용자는 시스템을 의심한다. 클라이언트가 먼저 움직이고, 서버가 나중에 확정하거나 교정하는 편이 이 경우에는 더 나은 선택이었다.
