@@ -6,7 +6,7 @@ date: 2026-01-23 23:56:41
 thumbnail: "https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/images/z-index.png"
 ---
 
-우리 서비스에는 오버레이 컴포넌트가 많다. 이미지 선택, 확인 다이얼로그, 설정 변경 등에 쓰이는 **Modal**. AI 이미지 생성, 음악 생성 등 AI 기능을 담은 **SidePanel**. 옵션 선택에 쓰이는 **Dropdown**. 이 셋이 서비스 전반에 걸쳐 반복적으로 등장한다.
+우리 서비스에는 오버레이 컴포넌트가 많다. 이미지 선택, 확인 다이얼로그, 설정 변경 등에 쓰이는 **Modal**. AI 이미지 생성, 음악 생성 등 AI 기능을 담은 **SidePanel**. 옵션 선택에 쓰이는 **Dropdown**. 이와 같은 오버레이 컴포넌트가 서비스 전반에 걸쳐 반복적으로 등장한다.
 
 문제는 이 컴포넌트들이 서로 위에 쌓인다는 것이었다. SidePanel에서 이미지를 선택하면 Modal이 열린다. Modal에서 AI 기능을 사용하면 SidePanel이 그 위에 열린다. SidePanel 위에 Modal이 열리고, 그 Modal 위에 또 다른 SidePanel이 열리기도 한다. Dropdown은 Modal 위에서도, SidePanel 위에서도 열릴 수 있다.
 
@@ -14,23 +14,19 @@ thumbnail: "https://raw.githubusercontent.com/itmakesmesoft/blog-contents/main/i
 
 ---
 
-## 문제
+## 다양한 오버레이 케이스들
 
-### 케이스 1 — SidePanel 위에 Modal
+#### 케이스 1 — SidePanel 위에 Modal
 
 SidePanel에서 이미지 선택 버튼을 누르면 Modal이 열려야 한다. 고정 z-index를 쓴다면 SidePanel에 `z-index: 90`, Modal에 `z-index: 100`을 주면 된다. Modal이 항상 위에 오니까 정상 동작한다.
 
-여기까지는 문제없다.
-
-### 케이스 2 — Modal에서 SidePanel 열기
+#### 케이스 2 — Modal에서 SidePanel 열기
 
 어떤 페이지에서는 Modal 내의 버튼을 클릭하면 SidePanel이 그 위에 열려야 한다. Modal 안에서 AI 이미지 생성 기능을 호출하는 경우다.
 
 고정값이라면 Modal은 `z-index: 100`, SidePanel은 `z-index: 90`이다. SidePanel이 Modal 뒤에 가려진다. 나중에 열렸는데도 뒤에 있다.
 
-고정값의 첫 번째 균열이다.
-
-### 케이스 3 — 재귀적 쌓임
+#### 케이스 3 — 재귀적 쌓임
 
 SidePanel을 열고, 그 위에 Modal을 열고, Modal에서 다시 SidePanel을 열고, 거기서 또 Modal을 연다. SidePanel → Modal → SidePanel → Modal. 실제 서비스에서 발생하는 흐름이다.
 
@@ -38,7 +34,7 @@ SidePanel을 열고, 그 위에 Modal을 열고, Modal에서 다시 SidePanel을
 
 어떤 숫자를 줘도 순서가 보장되지 않는다.
 
-### 왜 고정값은 안 되는가
+### 기존의 방식
 
 일반적인 접근은 컴포넌트 타입별로 고정값을 부여하는 것이다.
 
